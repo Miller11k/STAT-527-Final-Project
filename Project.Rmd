@@ -1,0 +1,52 @@
+---
+title: "Project"
+author: "Miller Kodish"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+install.packages("rstudioapi")
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+getwd()  # shows current working directory
+```
+
+# Loading In Datasets
+
+```{r}
+# Geekbench datasets
+recent_cpu <- read.csv("Datasets/Geekbench/recent-cpu-v6.csv")
+recent_gpu <- read.csv("Datasets/Geekbench/recent-gpu-v6.csv")
+single_core <- read.csv("Datasets/Geekbench/single-core-v4.csv")
+top_multi <- read.csv("Datasets/Geekbench/top-multi-core-v6.csv")
+top_single <- read.csv("Datasets/Geekbench/top-single-core-v6.csv")
+
+# Kaggle datasets
+gpu_benchmarks <- read.csv("Datasets/Kaggle/GPU_benchmarks_v7.csv")
+gpu_scores <- read.csv("Datasets/Kaggle/GPU_scores_graphicsAPIs.csv")
+```
+
+## Verifying Datasets Loaded In Correctly
+```{r}
+# Print basic info for each dataset
+datasets <- list(
+  recent_cpu = recent_cpu,
+  recent_gpu = recent_gpu,
+  single_core = single_core,
+  top_multi = top_multi,
+  top_single = top_single,
+  gpu_benchmarks = gpu_benchmarks,
+  gpu_scores = gpu_scores
+)
+
+for (name in names(datasets)) {
+  cat("===== Dataset:", name, "=====\n")
+  cat("Rows:", nrow(datasets[[name]]), " | Columns:", ncol(datasets[[name]]), "\n\n")
+  cat("Column Names:\n")
+  print(names(datasets[[name]]))
+  cat("\nStructure:\n")
+  str(datasets[[name]], max.level = 1)
+  cat("\n\n")
+}
+```
