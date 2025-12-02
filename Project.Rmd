@@ -1,6 +1,6 @@
 ---
 title: "Project"
-author: "Miller Kodish"
+author: "Miller Kodish, Ian Ou, Vinay Pundith"
 date: "`r Sys.Date()`"
 output: pdf_document
 ---
@@ -13,8 +13,8 @@ if (!requireNamespace("here", quietly = TRUE)) {
   install.packages("here")
 }
 library(here)
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-getwd()  # shows current working directory
+library(ggplot2)
+library(randomForest)
 ```
 
 # Loading In Datasets
@@ -58,6 +58,23 @@ for (name in names(datasets)) {
   str(datasets[[name]], max.level = 1)
   cat("\n\n")
 }
+```
+```{r}
+gpu_benchmarks$gpu_name <- tolower(trimws(gpu_benchmarks$gpuName))
+gpu_scores$gpu_name     <- tolower(trimws(gpu_scores$Device))
+
+merged_gpu <- merge(
+  gpu_benchmarks,
+  gpu_scores,
+  by = "gpu_name"
+)
+
+cat("Rows in PassMark dataset :", nrow(gpu_benchmarks), "\n")
+cat("Rows in Geekbench dataset:", nrow(gpu_scores), "\n")
+cat("Rows in merged dataset   :", nrow(merged_gpu), "\n\n")
+merged_gpu$gpuName <- NULL
+merged_gpu$Device <- NULL
+head(merged_gpu)
 ```
 
 # Filtering GPU Datasets By Manufacturer
@@ -152,44 +169,171 @@ for (t in test_types) {
 # Manufacturer × Test combinations
 tests <- c("CUDA", "Metal", "OpenCL", "Vulkan")
 
-# Build a nested list: manufacturer -> test -> dataset
-manu_test_split <- list()
-
-for (m in manufacturers) {
-  manu_test_split[[m]] <- list()
-  
-  for (t in tests) {
-    # Filter by manufacturer AND test ran (non-NA)
-    df <- subset(gpu_scores, Manufacturer == m & !is.na(gpu_scores[[t]]))
-    
-    manu_test_split[[m]][[t]] <- df
-  }
-}
-
-# Print summaries (sorted manufacturers, "Other" last)
+# Sort manufacturers alphabetically, but move "Other" to the end
 sorted_manufacturers <- sort(manufacturers[manufacturers != "Other"])
 sorted_manufacturers <- c(sorted_manufacturers, "Other")
 
 for (m in sorted_manufacturers) {
   for (t in tests) {
-    df <- manu_test_split[[m]][[t]]
     
+    # Filter by manufacturer AND non-NA in test
+    df <- subset(gpu_scores, Manufacturer == m & !is.na(gpu_scores[[t]]))
+    
+    # Skip empty datasets (DO NOT CREATE THE VARIABLE)
+    if (nrow(df) == 0) {
+      next
+    }
+    
+    # Build variable name: manufacturer_test_gpu_scores
+    var_name <- paste0(
+      tolower(m), "_",
+      tolower(t), "_gpu_scores"
+    )
+    
+    # Save only if data exists
+    assign(var_name, df)
+    
+    # Print summary
     cat("====", m, "-", t, "Test ====\n")
     cat("Rows:", nrow(df), " | Columns:", ncol(df), "\n\n")
     
-    if (nrow(df) > 0) {
-      cat("Column Names:\n")
-      print(names(df))
-      
-      cat("\nHead (first 3 rows):\n")
-      print(head(df, 3))
-    } else {
-      cat("No rows for this combination.\n")
-    }
+    cat("Column Names:\n")
+    print(names(df))
+    
+    cat("\nHead (first 3 rows):\n")
+    print(head(df, 3))
     
     cat("\n\n")
   }
 }
+```
+
+```{r}
+ls(pattern = "_gpu_scores$")
+```
+
+Generate plot to see relationship between CUDA/OpenCL/Vulkan to G3dmark
+```{r}
+plot_scatter <- function(x_col, y_col, data) {
+  ggplot(data, aes_string(x = x_col, y = y_col, color = "Manufacturer")) +
+    geom_point(alpha = 0.7) +
+    theme_minimal() +
+    labs(
+      title = paste(x_col, "vs", y_col),
+      x = paste(x_col, "(PassMark)"),
+      y = paste(y_col, "(Geekbench 5)"),
+      color = "Manufacturer"
+    )
+}
+
+# G3Dmark vs CUDA
+print(plot_scatter("G3Dmark", "CUDA", merged_gpu))
+# G3Dmark vs OpenCL
+print(plot_scatter("G3Dmark", "OpenCL", merged_gpu))
+# G3Dmark vs Vulkan
+print(plot_scatter("G3Dmark", "Vulkan", merged_gpu))
+# G3Dmark vs Metal (mostly Apple GPUs)
+if ("Metal" %in% names(merged_gpu)) {
+  print(plot_scatter("G3Dmark", "Metal", merged_gpu))
+}
+# Manufacturer Distribution
+ggplot(merged_gpu, aes(x = Manufacturer)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(
+    title = "GPU Manufacturer Count in Merged Dataset",
+    x = "Manufacturer",
+    y = "Count"
+  )
+```
+
+Plot the trends 
+```{r}
+# gpu performance over time
+ggplot(merged_gpu, aes(x = testDate, y = G3Dmark)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_smooth(method = "loess", se = FALSE, color = "darkblue") +
+  theme_minimal() +
+  labs(
+    title = "GPU Performance Trend Over Time",
+    x = "Year",
+    y = "G3Dmark (PassMark Performance Score)"
+  )
+
+# tdp over time
+ggplot(merged_gpu, aes(x = testDate, y = TDP)) +
+  geom_point(alpha = 0.4, color = "firebrick") +
+  geom_smooth(method = "loess", se = FALSE, color = "darkred") +
+  theme_minimal() +
+  labs(
+    title = "GPU Power Consumption Trend Over Time",
+    x = "Year",
+    y = "TDP (Watts)"
+  )
+
+# performance per watt over time
+merged_gpu$PerfPerWatt <- merged_gpu$G3Dmark / merged_gpu$TDP
+ggplot(merged_gpu, aes(x = testDate, y = PerfPerWatt)) +
+  geom_point(alpha = 0.4, color = "forestgreen") +
+  geom_smooth(method = "loess", se = FALSE, color = "darkgreen") +
+  theme_minimal() +
+  labs(
+    title = "GPU Efficiency Trend Over Time",
+    x = "Year",
+    y = "G3Dmark per Watt"
+  )
+
+
+# amd vs nvidia
+ggplot(merged_gpu, aes(x = testDate, y = G3Dmark, color = Manufacturer)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(se = FALSE) +
+  theme_minimal() +
+  labs(
+    title = "Performance Trend Over Time by Manufacturer",
+    x = "Year",
+    y = "G3Dmark Score"
+  )
+```
+
+Build a simple linear regression model
+```{r}
+# build a linear regression model
+merged_gpu$Manufacturer <- as.factor(merged_gpu$Manufacturer)
+merged_gpu$category <- as.factor(merged_gpu$category)
+linear_model <- lm(G3Dmark ~ testDate + TDP + price + Manufacturer + category, data = merged_gpu)
+summary(linear_model)
+```
+
+Build a random forest model with feature importance
+```{r}
+rf_data <- merged_gpu[, c("G3Dmark", "testDate", "TDP", "price", "Manufacturer", "category")]
+rf_data <- na.omit(rf_data)
+rf_data$Manufacturer <- as.factor(rf_data$Manufacturer)
+rf_data$category <- as.factor(rf_data$category)
+nrow(rf_data)
+
+n <- nrow(rf_data)
+ix <- sample(seq_len(n), size = floor(0.8 * n))
+train_rf <- rf_data[ix, ]
+test_rf  <- rf_data[-ix, ]
+rf_model <- randomForest(
+  G3Dmark ~ testDate + TDP + price + Manufacturer + category,
+  data   = train_rf,
+  ntree  = 500,
+  mtry   = 3,
+  importance = TRUE
+)
+
+pred_rf <- predict(rf_model, newdata = test_rf)
+rmse <- sqrt(mean((pred_rf - test_rf$G3Dmark)^2))
+mae  <- mean(abs(pred_rf - test_rf$G3Dmark))
+r2   <- 1 - sum((pred_rf - test_rf$G3Dmark)^2) / sum((mean(train_rf$G3Dmark) - test_rf$G3Dmark)^2)
+
+cat("RF RMSE:", rmse, "\n")
+cat("RF MAE :", mae,  "\n")
+cat("RF R^2 :", r2,   "\n")
+varImpPlot(rf_model)
 ```
 
 For GPUs, geekbench reports testbench results based on these tests
