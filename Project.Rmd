@@ -14,6 +14,8 @@ if (!requireNamespace("here", quietly = TRUE)) {
 }
 library(here)
 library(ggplot2)
+library(tidyverse)
+library(tidymodels)
 library(randomForest)
 ```
 
@@ -132,7 +134,6 @@ for (m in sorted_manufacturers) {
 ```
 
 # Filtering GPU Dataset By Test Ran
-
 ```{r}
 cuda_tests    <- subset(gpu_scores, !is.na(CUDA))
 metal_tests   <- subset(gpu_scores, !is.na(Metal))
@@ -164,7 +165,6 @@ for (t in test_types) {
 ```
 
 # Filtering by Manufacturer AND Test Ran
-
 ```{r}
 # Manufacturer × Test combinations
 tests <- c("CUDA", "Metal", "OpenCL", "Vulkan")
@@ -298,46 +298,80 @@ ggplot(merged_gpu, aes(x = testDate, y = G3Dmark, color = Manufacturer)) +
 
 Build a simple linear regression model
 ```{r}
-# build a linear regression model
-merged_gpu$Manufacturer <- as.factor(merged_gpu$Manufacturer)
-merged_gpu$category <- as.factor(merged_gpu$category)
-linear_model <- lm(G3Dmark ~ testDate + TDP + price + Manufacturer + category, data = merged_gpu)
-summary(linear_model)
+data <- merged_gpu |> select(G3Dmark, testDate, TDP, price, Manufacturer, category) |>drop_na()
+lin_recipe <- recipe(G3Dmark ~ ., data = data) |> step_dummy(all_nominal_predictors())
+lin_spec <- linear_reg() |> set_engine("lm")
+lin_wf <- workflow() |> add_model(lin_spec) |> add_recipe(lin_recipe)
+lin_fit <- lin_wf |> fit(data = data)
+lin_preds <- predict(lin_fit, new_data = data) |> bind_cols(data |> select(G3Dmark))
+lin_metrics <- lin_preds |> metrics(truth = G3Dmark, estimate = .pred)
+lin_metrics
 ```
 
-Build a random forest model with feature importance
+Build a random forest model with feature importance (using Tidymodels)
 ```{r}
-rf_data <- merged_gpu[, c("G3Dmark", "testDate", "TDP", "price", "Manufacturer", "category")]
-rf_data <- na.omit(rf_data)
-rf_data$Manufacturer <- as.factor(rf_data$Manufacturer)
-rf_data$category <- as.factor(rf_data$category)
-nrow(rf_data)
+data <- merged_gpu |> select(G3Dmark, testDate, TDP, price, Manufacturer, category) |> drop_na() |> 
+  mutate(Manufacturer=as.factor(Manufacturer), category = as.factor(category))
 
-n <- nrow(rf_data)
-ix <- sample(seq_len(n), size = floor(0.8 * n))
-train_rf <- rf_data[ix, ]
-test_rf  <- rf_data[-ix, ]
-rf_model <- randomForest(
-  G3Dmark ~ testDate + TDP + price + Manufacturer + category,
-  data   = train_rf,
-  ntree  = 500,
-  mtry   = 3,
-  importance = TRUE
-)
+# split train/test 80/20
+data_split <- initial_split(data, prop=0.8)
+train_rf <- training(data_split)
+test_rf  <- testing(data_split)
 
-pred_rf <- predict(rf_model, newdata = test_rf)
-rmse <- sqrt(mean((pred_rf - test_rf$G3Dmark)^2))
-mae  <- mean(abs(pred_rf - test_rf$G3Dmark))
-r2   <- 1 - sum((pred_rf - test_rf$G3Dmark)^2) / sum((mean(train_rf$G3Dmark) - test_rf$G3Dmark)^2)
+# make recipe
+rf_recipe <- recipe(G3Dmark ~ testDate + TDP + price + Manufacturer + category, data=train_rf) |> step_normalize(all_numeric_predictors())
 
-cat("RF RMSE:", rmse, "\n")
-cat("RF MAE :", mae,  "\n")
-cat("RF R^2 :", r2,   "\n")
-varImpPlot(rf_model)
+# make random forest model
+rf_spec <-rand_forest(mtry=3, trees=500, min_n=5) |> set_mode("regression") |> set_engine("randomForest", importance = TRUE)
+
+# user workflow and fit and predict
+rf_wf <- workflow() |> add_model(rf_spec) |> add_recipe(rf_recipe)
+rf_fit <- rf_wf |> fit(data = train_rf)
+rf_preds <- predict(rf_fit, new_data=test_rf) |> bind_cols(test_rf |> select(G3Dmark))
+
+# see metrics
+rf_metrics <- rf_preds |> metrics(truth = G3Dmark, estimate = .pred)
+rf_metrics
+
+rf_fit |> extract_fit_parsnip() |> pluck("fit") |> varImpPlot()
 ```
 
-For GPUs, geekbench reports testbench results based on these tests
-
+LASSO/Ridge Regression
 ```{r}
+data <- merged_gpu |> select(G3Dmark, testDate, TDP, price, Manufacturer, category) |> drop_na() |> mutate(Manufacturer = factor(Manufacturer), category = factor(category))
+set.seed(123)
+reg_split <- initial_split(data, prop = 0.8)
+train_reg <- training(reg_split)
+test_reg  <- testing(reg_split)
 
+reg_recipe <-
+  recipe(G3Dmark ~ testDate + TDP + price + Manufacturer + category, data = train_reg) |> step_normalize(all_numeric_predictors()) |> step_dummy(all_nominal_predictors())
+
+
+ridge_spec <-linear_reg(penalty = tune(), mixture = 0) |> set_engine("glmnet")
+lasso_spec <-linear_reg(penalty = tune(),mixture = 1) |> set_engine("glmnet")
+ridge_wf <- workflow() |> add_model(ridge_spec) |> add_recipe(reg_recipe)
+lasso_wf <- workflow() |> add_model(lasso_spec) |> add_recipe(reg_recipe)
+
+set.seed(123)
+reg_folds <- vfold_cv(train_reg, v = 5)
+lambda_grid <- grid_regular(penalty(), levels = 30)
+ridge_tuned <- tune_grid(ridge_wf, resamples = reg_folds, grid = lambda_grid, metrics = metric_set(rmse, rsq, mae))
+lasso_tuned <-tune_grid(lasso_wf,resamples = reg_folds, grid = lambda_grid, metrics= metric_set(rmse, rsq, mae))
+
+best_ridge <- ridge_tuned |> select_best(metric = "rmse")
+best_lasso <- lasso_tuned |> select_best(metric = "rmse")
+best_ridge
+best_lasso
+
+ridge_final_fit <-ridge_wf |> finalize_workflow(best_ridge) |> fit(data = train_reg)
+lasso_final_fit <- lasso_wf |> finalize_workflow(best_lasso) |> fit(data = train_reg)
+
+ridge_preds <-predict(ridge_final_fit, new_data = test_reg) |> bind_cols(test_reg |> select(G3Dmark))
+lasso_preds <-predict(lasso_final_fit, new_data = test_reg) |> bind_cols(test_reg |> select(G3Dmark))
+
+ridge_metrics <- ridge_preds |> metrics(truth = G3Dmark, estimate = .pred)
+lasso_metrics <- lasso_preds |> metrics(truth = G3Dmark, estimate = .pred)
+ridge_metrics
+lasso_metrics
 ```
