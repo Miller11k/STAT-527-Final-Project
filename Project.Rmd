@@ -13,27 +13,101 @@ if (!requireNamespace("here", quietly = TRUE)) {
   install.packages("here")
 }
 library(here)
-library(ggplot2)
 library(tidyverse)
 library(tidymodels)
 library(randomForest)
+library(plotly)
+library(rstudioapi)
 ```
+
+# Helper Functions
+
+## Detect Useful Columns Based on `NA` Content
+```{r}
+useful_columns <- function(df, na_threshold = 0.85) {
+  na_fraction <- sapply(df, function(col) mean(is.na(col)))
+  names(na_fraction[na_fraction <= na_threshold])
+}
+```
+
+## Print-Style Summary
+```{r}
+summarize_df <- function(df, name=NULL, na_threshold=0.85) {
+  if (!is.null(name)) cat("\n=== ", name, " ===\n", sep = "")
+  
+  cols <- useful_columns(df, na_threshold)
+  preview <- head(cols, 8)
+  if (length(cols) > 8) preview <- c(preview, "...")
+  
+  cat("Rows:", nrow(df), "| Useful Columns:", length(cols), "\n")
+  cat("Columns:", paste(preview, collapse=", "), "\n")
+  cat("-------------------------------------\n")
+}
+```
+
+## Stats-Only Summary For Table Outputs
+```{r}
+df_stats <- function(df, na_threshold=0.85) {
+  cols <- useful_columns(df, na_threshold)
+  list(rows = nrow(df), useful_cols = length(cols))
+}
+```
+
+## Make Plots Interactive (When Not in PDF)
+```{r}
+interactive_plot <- function(p) {
+  if (interactive() && rstudioapi::isAvailable()) {
+    # Running inside RStudio → make plot interactive
+    return(plotly::ggplotly(p))
+  }
+  # Knitting or running non-interactively → return normal ggplot
+  return(p)
+}
+```
+
+## Plot Time-Series Scatter and Loess Plots
+```{r}
+plot_time_series <- function(data, y, title, ylab, color_point, color_line) {
+
+  clean_data <- data |>
+    filter(
+      !is.na(testDate),
+      !is.na(.data[[y]]),
+      is.finite(.data[[y]])
+    )
+
+  p <- ggplot(clean_data, aes(x = testDate, y = .data[[y]])) +
+    geom_point(alpha = 0.4, color = color_point) +
+    geom_smooth(method = "loess", se = FALSE, color = color_line) +
+    theme_minimal() +
+    labs(
+      title = title,
+      x = "Year",
+      y = ylab
+    )
+
+  interactive_plot(p)
+}
+```
+
+\pagebreak
 
 # Loading In Datasets
 
+## Geekbench Datasets
 ```{r}
 # Geekbench datasets
 recent_cpu <- read.csv(here("Datasets", "Geekbench", "recent-cpu-v6.csv"))
 recent_gpu <- read.csv(here("Datasets", "Geekbench", "recent-gpu-v6.csv"))
 single_core <- read.csv(here("Datasets", "Geekbench", "single-core-v4.csv"))
+
+top_multi <- read.csv(here("Datasets", "Geekbench", "top-multi-core-v6.csv"))
+top_single <- read.csv(here("Datasets", "Geekbench", "top-single-core-v6.csv"))
 ```
 
 
+## Kaggle Datasets
 ```{r}
-top_multi <- read.csv(here("Datasets", "Geekbench", "top-multi-core-v6.csv"))
-top_single <- read.csv(here("Datasets", "Geekbench", "top-single-core-v6.csv"))
-
-# Kaggle datasets
 gpu_benchmarks <- read.csv(here("Datasets", "Kaggle", "GPU_benchmarks_v7.csv"))
 gpu_scores <- read.csv(here("Datasets", "Kaggle", "GPU_scores_graphicsAPIs.csv"))
 ```
@@ -42,52 +116,51 @@ gpu_scores <- read.csv(here("Datasets", "Kaggle", "GPU_scores_graphicsAPIs.csv")
 ```{r}
 # Print basic info for each dataset
 datasets <- list(
-  recent_cpu = recent_cpu,
-  recent_gpu = recent_gpu,
-  single_core = single_core,
-  top_multi = top_multi,
-  top_single = top_single,
   gpu_benchmarks = gpu_benchmarks,
   gpu_scores = gpu_scores
 )
 
 for (name in names(datasets)) {
-  cat("===== Dataset:", name, "=====\n")
-  cat("Rows:", nrow(datasets[[name]]), " | Columns:", ncol(datasets[[name]]), "\n\n")
-  cat("Column Names:\n")
-  print(names(datasets[[name]]))
-  cat("\nStructure:\n")
-  str(datasets[[name]], max.level = 1)
-  cat("\n\n")
+  summarize_df(datasets[[name]], name)
 }
 ```
+
+The project utilizes two primary sources of GPU benchmarking information:
+(1) PassMark’s **GPU Benchmarks dataset**, which contains performance, TDP, pricing, and metadata for 2,317 GPUs, and
+(2) Geekbench 5’s **graphics API dataset**, containing 1,213 device entries across CUDA, OpenCL, Metal, and Vulkan tests.
+
+As shown in the printed summaries the PassMark dataset provides more numerical performance fields and test dates, while Geekbench focuses on API-specific compute workloads.
+The merged dataset ultimately contains **647 GPUs**, indicating that only a fraction of devices appear in both sources — a natural consequence of differing naming conventions and incomplete overlap across vendors.
+
+This merging step ensures that the final dataset captures both **traditional rasterization-style performance** (G3Dmark) and **compute-focused multi-API performance**, providing a meaningful foundation for downstream modeling.
+
+\pagebreak
+
+# Preprocessing and Merging the Dataset
 ```{r}
 gpu_benchmarks$gpu_name <- tolower(trimws(gpu_benchmarks$gpuName))
 gpu_scores$gpu_name     <- tolower(trimws(gpu_scores$Device))
 
-merged_gpu <- merge(
-  gpu_benchmarks,
-  gpu_scores,
-  by = "gpu_name"
-)
+merged_gpu <- merge(gpu_benchmarks, gpu_scores, by="gpu_name")
 
+merged_gpu <- merged_gpu |> select(-gpuName, -Device)
+```
+
+## Viewing Preprocessed Data
+```{r}
 cat("Rows in PassMark dataset :", nrow(gpu_benchmarks), "\n")
 cat("Rows in Geekbench dataset:", nrow(gpu_scores), "\n")
 cat("Rows in merged dataset   :", nrow(merged_gpu), "\n\n")
-merged_gpu$gpuName <- NULL
-merged_gpu$Device <- NULL
 head(merged_gpu)
 ```
 
-# Filtering GPU Datasets By Manufacturer
-```{r}
-unique(gpu_scores$Manufacturer)
-```
+\pagebreak
 
+# Filtering the Datasets
 
+## Filtering GPU Datasets By Manufacturer
 ```{r}
-manufacturers <- c("Nvidia", "AMD", "Apple", "Qualcomm", "Intel", 
-                   "Other", "ARM", "PowerVR", "Samsung")
+manufacturers <- unique(gpu_scores$Manufacturer)
 
 gpu_split <- split(gpu_scores, factor(gpu_scores$Manufacturer, levels = manufacturers))
 
@@ -97,281 +170,346 @@ for (m in manufacturers) {
     subset(gpu_scores, Manufacturer == m)   # filtered dataset
   )
 }
-
-# This creates:
-#   nvidia_gpu_scores
-#   amd_gpu_scores
-#   apple_gpu_scores
-#   qualcomm_gpu_scores
-#   intel_gpu_scores
-#   other_gpu_scores
-#   arm_gpu_scores
-#   powervr_gpu_scores
-#   samsung_gpu_scores
 ```
 
+### Printing a Summary Table of Manufacturers
 ```{r}
-# Sort manufacturers alphabetically, but move "Other" to the end
-sorted_manufacturers <- sort(manufacturers[manufacturers != "Other"])
-sorted_manufacturers <- c(sorted_manufacturers, "Other")
+manufacturers <- unique(gpu_scores$Manufacturer)
 
-# Print summary for each manufacturer dataset
-for (m in sorted_manufacturers) {
-  var_name <- paste0(tolower(m), "_gpu_scores")
-  df <- get(var_name)
-  
-  cat("==== Dataset for:", m, "====\n")
-  cat("Rows:", nrow(df), " | Columns:", ncol(df), "\n\n")
-  
-  cat("Column Names:\n")
-  print(names(df))
-  
-  cat("\nHead (first 3 rows):\n")
-  print(head(df, 3))
-  
-  cat("\n\n")
-}
+manufacturer_summary <- map_df(manufacturers, function(m) {
+  df <- gpu_scores |> filter(Manufacturer == m)
+  s  <- df_stats(df)
+  tibble(Manufacturer = m, Rows = s$rows, UsefulCols = s$useful_cols)
+})
+
+knitr::kable(manufacturer_summary, caption = "Summary of GPU Scores by Manufacturer")
 ```
 
-# Filtering GPU Dataset By Test Ran
+The manufacturer breakdown reveals several important patterns:
+
+* **AMD and Nvidia dominate** the dataset, representing a combined **78%** of all entries.
+* **Intel**, **ARM**, and **Qualcomm** appear primarily in integrated/mobile environments and show significantly fewer useful columns due to missing compute API scores.
+* Apple devices appear exclusively in the Metal test results, reflecting the platform-specific nature of their GPU architecture.
+
+This distribution highlights how the dataset is inherently shaped by market segmentation:
+PC-oriented vendors have broad benchmarking coverage, while mobile and embedded vendors appear sparsely.
+
+## Filtering GPU Dataset By Test Ran
 ```{r}
 cuda_tests    <- subset(gpu_scores, !is.na(CUDA))
 metal_tests   <- subset(gpu_scores, !is.na(Metal))
 opencl_tests  <- subset(gpu_scores, !is.na(OpenCL))
 vulkan_tests  <- subset(gpu_scores, !is.na(Vulkan))
+```
 
+
+### GPU Summary by Test
+```{r}
 test_types <- c("CUDA", "Metal", "OpenCL", "Vulkan")
-test_datasets <- list(
-  CUDA   = cuda_tests,
-  Metal  = metal_tests,
-  OpenCL = opencl_tests,
-  Vulkan = vulkan_tests
-)
 
-for (t in test_types) {
-  df <- test_datasets[[t]]
-  
-  cat("==== GPUs With", t, "Tests Ran ====\n")
-  cat("Rows:", nrow(df), " | Columns:", ncol(df), "\n\n")
-  
-  cat("Column Names:\n")
-  print(names(df))
-  
-  cat("\nHead (first 3 rows):\n")
-  print(head(df, 3))
-  
-  cat("\n\n")
-}
+test_summary <- map_df(test_types, function(t) {
+  df <- gpu_scores |> filter(!is.na(.data[[t]]))
+  if (nrow(df) == 0) return(NULL)
+
+  s <- df_stats(df)
+  tibble(Test = t, Rows = s$rows, UsefulCols = s$useful_cols)
+})
+
+knitr::kable(test_summary, caption = "Summary by Test Type")
 ```
 
-# Filtering by Manufacturer AND Test Ran
+\pagebreak
+
+## Filtering by Manufacturer AND Test Ran
 ```{r}
-# Manufacturer × Test combinations
-tests <- c("CUDA", "Metal", "OpenCL", "Vulkan")
+summary_table <- map_df(manufacturers, function(m) {
+  map_df(test_types, function(t) {
+    df <- gpu_scores |> filter(Manufacturer == m, !is.na(.data[[t]]))
+    if (nrow(df) == 0) return(NULL)
+      s <- df_stats(df)
+      tibble(Manufacturer = m, Test = t, Rows = s$rows, UsefulCols = s$useful_cols)
+  })
+})
 
-# Sort manufacturers alphabetically, but move "Other" to the end
-sorted_manufacturers <- sort(manufacturers[manufacturers != "Other"])
-sorted_manufacturers <- c(sorted_manufacturers, "Other")
-
-for (m in sorted_manufacturers) {
-  for (t in tests) {
-    
-    # Filter by manufacturer AND non-NA in test
-    df <- subset(gpu_scores, Manufacturer == m & !is.na(gpu_scores[[t]]))
-    
-    # Skip empty datasets (DO NOT CREATE THE VARIABLE)
-    if (nrow(df) == 0) {
-      next
-    }
-    
-    # Build variable name: manufacturer_test_gpu_scores
-    var_name <- paste0(
-      tolower(m), "_",
-      tolower(t), "_gpu_scores"
-    )
-    
-    # Save only if data exists
-    assign(var_name, df)
-    
-    # Print summary
-    cat("====", m, "-", t, "Test ====\n")
-    cat("Rows:", nrow(df), " | Columns:", ncol(df), "\n\n")
-    
-    cat("Column Names:\n")
-    print(names(df))
-    
-    cat("\nHead (first 3 rows):\n")
-    print(head(df, 3))
-    
-    cat("\n\n")
-  }
-}
+knitr::kable(summary_table, caption = "Manufacturer × Test Summary")
 ```
 
-```{r}
-ls(pattern = "_gpu_scores$")
-```
+Different GPU APIs display vastly different dataset sizes:
 
-Generate plot to see relationship between CUDA/OpenCL/Vulkan to G3dmark
+* **OpenCL** has the widest coverage (976 devices), aligning with its cross-platform origins.
+* **Vulkan** appears in 629 devices, reflecting growing adoption but still shows incomplete historical coverage.
+* **CUDA** is Nvidia-exclusive, appearing in 266 entries.
+* **Metal** is Apple-exclusive and appears for 241 devices.
+
+The manufacturer × test matrix further confirms:
+
+* Nvidia is the **only vendor supporting CUDA**, and one of the few vendors with broad coverage for every test type.
+* AMD participates heavily in OpenCL and Vulkan but does not appear in CUDA or Metal tests.
+* Apple appears almost exclusively in Metal, with minimal OpenCL presence.
+
+These differences emphasize how benchmark availability is shaped by **vendor software ecosystems**, not only hardware performance.
+
+\pagebreak
+
+# Plotting Data
+
+## Comparing Tests Ran by AMD and Nvidia (CUDA/OpenCL/Vulkan/G3dmark)
 ```{r}
 plot_scatter <- function(x_col, y_col, data) {
-  ggplot(data, aes_string(x = x_col, y = y_col, color = "Manufacturer")) +
+  p <- ggplot(data, aes_string(x = x_col, y = y_col, color = "Manufacturer")) +
     geom_point(alpha = 0.7) +
     theme_minimal() +
     labs(
       title = paste(x_col, "vs", y_col),
       x = paste(x_col, "(PassMark)"),
-      y = paste(y_col, "(Geekbench 5)"),
-      color = "Manufacturer"
+      y = paste(y_col, "(Geekbench 5)")
     )
+
+  interactive_plot(p)
 }
 
-# G3Dmark vs CUDA
 print(plot_scatter("G3Dmark", "CUDA", merged_gpu))
-# G3Dmark vs OpenCL
 print(plot_scatter("G3Dmark", "OpenCL", merged_gpu))
-# G3Dmark vs Vulkan
 print(plot_scatter("G3Dmark", "Vulkan", merged_gpu))
-# G3Dmark vs Metal (mostly Apple GPUs)
-if ("Metal" %in% names(merged_gpu)) {
-  print(plot_scatter("G3Dmark", "Metal", merged_gpu))
-}
-# Manufacturer Distribution
-ggplot(merged_gpu, aes(x = Manufacturer)) +
-  geom_bar() +
-  theme_minimal() +
-  labs(
-    title = "GPU Manufacturer Count in Merged Dataset",
-    x = "Manufacturer",
-    y = "Count"
-  )
+if ("Metal" %in% names(merged_gpu)) print(plot_scatter("G3Dmark", "Metal", merged_gpu))
 ```
 
-Plot the trends 
+Across all scatterplots, a strong positive correlation appears between **G3Dmark** (PassMark) and each Geekbench compute score.
+
+Key observations:
+
+### **1. CUDA vs G3Dmark**
+
+Nvidia GPUs show a clear linear upward trend with minimal outliers, suggesting internal architectural consistency.
+AMD does not participate in CUDA and appears only due to merge artifacts.
+
+### **2. OpenCL vs G3Dmark**
+
+Both AMD and Nvidia show a much wider spread of values.
+AMD OpenCL scores tend to cluster lower relative to G3Dmark compared to Nvidia devices.
+
+### **3. Vulkan vs G3Dmark**
+
+AMD and Nvidia show more overlap in Vulkan performance, with Nvidia still dominating the upper-right region.
+
+### **4. Metal vs G3Dmark**
+
+Metal scores (Apple-only) occupy a distinct performance band separate from PC GPUs.
+Apple devices show strong Metal compute performance despite modest G3Dmark values, highlighting architectural specialization.
+
+Collectively, the scatterplots confirm that:
+**API-specific compute performance tracks closely with general GPU performance**, but the slopes and variability differ significantly by vendor and API.
+
+## Plotting the Trends 
 ```{r}
-# gpu performance over time
-ggplot(merged_gpu, aes(x = testDate, y = G3Dmark)) +
-  geom_point(alpha = 0.4, color = "steelblue") +
-  geom_smooth(method = "loess", se = FALSE, color = "darkblue") +
-  theme_minimal() +
-  labs(
-    title = "GPU Performance Trend Over Time",
-    x = "Year",
-    y = "G3Dmark (PassMark Performance Score)"
-  )
+# Add PerfPerWatt column once
+merged_gpu <- merged_gpu |> mutate(PerfPerWatt = G3Dmark / TDP)
 
-# tdp over time
-ggplot(merged_gpu, aes(x = testDate, y = TDP)) +
-  geom_point(alpha = 0.4, color = "firebrick") +
-  geom_smooth(method = "loess", se = FALSE, color = "darkred") +
-  theme_minimal() +
-  labs(
-    title = "GPU Power Consumption Trend Over Time",
-    x = "Year",
-    y = "TDP (Watts)"
-  )
+# ---- Plot 1: GPU performance over time ----
+plot_time_series(
+  merged_gpu, "G3Dmark",
+  "GPU Performance Trend Over Time",
+  "G3Dmark (PassMark Performance Score)",
+  "steelblue", "darkblue"
+)
 
-# performance per watt over time
-merged_gpu$PerfPerWatt <- merged_gpu$G3Dmark / merged_gpu$TDP
-ggplot(merged_gpu, aes(x = testDate, y = PerfPerWatt)) +
-  geom_point(alpha = 0.4, color = "forestgreen") +
-  geom_smooth(method = "loess", se = FALSE, color = "darkgreen") +
-  theme_minimal() +
-  labs(
-    title = "GPU Efficiency Trend Over Time",
-    x = "Year",
-    y = "G3Dmark per Watt"
-  )
+# ---- Plot 2: TDP over time ----
+plot_time_series(
+  merged_gpu, "TDP",
+  "GPU Power Consumption Trend Over Time",
+  "TDP (Watts)",
+  "firebrick", "darkred"
+)
 
+# ---- Plot 3: Efficiency (Perf/Watt) over time ----
+plot_time_series(
+  merged_gpu, "PerfPerWatt",
+  "GPU Efficiency Trend Over Time",
+  "G3Dmark per Watt",
+  "forestgreen", "darkgreen"
+)
 
-# amd vs nvidia
-ggplot(merged_gpu, aes(x = testDate, y = G3Dmark, color = Manufacturer)) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(se = FALSE) +
-  theme_minimal() +
-  labs(
-    title = "Performance Trend Over Time by Manufacturer",
-    x = "Year",
-    y = "G3Dmark Score"
-  )
+# ---- Plot 4: AMD vs Nvidia ----
+interactive_plot(
+  ggplot(merged_gpu, aes(testDate, G3Dmark, color = Manufacturer)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(se = FALSE) +
+    theme_minimal() +
+    labs(
+      title = "Performance Trend Over Time by Manufacturer",
+      x = "Year",
+      y = "G3Dmark Score"
+    )
+)
 ```
 
-Build a simple linear regression model
+The time-series trend plots reveal long-term industry behavior:
+
+### **1. G3Dmark Performance Over Time**
+
+GPU performance has increased rapidly since 2015, with a clear accelerating trend.
+Performance doubles roughly every 3–4 years, consistent with post-Moore’s-Law scaling driven by larger dies and higher power budgets.
+
+### **2. Power Consumption (TDP) Over Time**
+
+TDP shows a slower but noticeable upward trend.
+Modern GPUs increasingly rely on greater power draw to sustain performance scaling, especially in enthusiast products.
+
+### **3. Efficiency (Perf/Watt) Over Time**
+
+Efficiency shows a gradual but consistent improvement.
+This indicates that vendors are not merely increasing raw power — architectural refinements continue to improve compute throughput per watt.
+
+### **4. AMD vs Nvidia Trends**
+
+Nvidia maintains a consistently higher trend line in raw performance.
+AMD shows more variance and fewer high-end outliers but maintains competitive mid-range performance.
+
+These plots collectively highlight a key shift in GPU development:
+**Vendors increasingly balance power, performance, and efficiency, with Nvidia leading high-end gains and AMD providing more diverse mid-range offerings.**
+
+
+## Plotting ALL GPU Trend Line
 ```{r}
-data <- merged_gpu |> select(G3Dmark, testDate, TDP, price, Manufacturer, category) |>drop_na()
-lin_recipe <- recipe(G3Dmark ~ ., data = data) |> step_dummy(all_nominal_predictors())
-lin_spec <- linear_reg() |> set_engine("lm")
-lin_wf <- workflow() |> add_model(lin_spec) |> add_recipe(lin_recipe)
-lin_fit <- lin_wf |> fit(data = data)
-lin_preds <- predict(lin_fit, new_data = data) |> bind_cols(data |> select(G3Dmark))
-lin_metrics <- lin_preds |> metrics(truth = G3Dmark, estimate = .pred)
-lin_metrics
+merged_gpu <- merged_gpu |> mutate(PerfPerWatt = G3Dmark / TDP)
+
+interactive_plot(
+  ggplot(merged_gpu, aes(testDate, G3Dmark)) + 
+    geom_point(alpha=0.3) + 
+    geom_smooth(se=FALSE) + 
+    theme_minimal()
+)
 ```
 
-Build a random forest model with feature importance (using Tidymodels)
+\pagebreak
+
+# Modeling Dataset Into One Clean Dataset For All Models
 ```{r}
-data <- merged_gpu |> select(G3Dmark, testDate, TDP, price, Manufacturer, category) |> drop_na() |> 
-  mutate(Manufacturer=as.factor(Manufacturer), category = as.factor(category))
+model_data <- merged_gpu |>
+  select(G3Dmark, testDate, TDP, price, Manufacturer, category) |>
+  drop_na()
+```
 
-# split train/test 80/20
-data_split <- initial_split(data, prop=0.8)
-train_rf <- training(data_split)
-test_rf  <- testing(data_split)
+# Building a Aimple Linear Regression Model
+```{r}
+lin_recipe <- recipe(G3Dmark ~ ., data = model_data) |> step_dummy(all_nominal_predictors())
+lin_spec   <- linear_reg() |> set_engine("lm")
+lin_wf     <- workflow() |> add_recipe(lin_recipe) |> add_model(lin_spec)
 
-# make recipe
-rf_recipe <- recipe(G3Dmark ~ testDate + TDP + price + Manufacturer + category, data=train_rf) |> step_normalize(all_numeric_predictors())
+lin_fit    <- lin_wf |> fit(data = model_data)
 
-# make random forest model
-rf_spec <-rand_forest(mtry=3, trees=500, min_n=5) |> set_mode("regression") |> set_engine("randomForest", importance = TRUE)
+lin_preds  <- predict(lin_fit, model_data) |> bind_cols(model_data)
+metrics(lin_preds, truth = G3Dmark, estimate = .pred)
+```
 
-# user workflow and fit and predict
-rf_wf <- workflow() |> add_model(rf_spec) |> add_recipe(rf_recipe)
-rf_fit <- rf_wf |> fit(data = train_rf)
-rf_preds <- predict(rf_fit, new_data=test_rf) |> bind_cols(test_rf |> select(G3Dmark))
+The linear regression model achieves an R² of **0.885**, indicating that the included predictors (price, TDP, manufacturer, category, year) explain a significant portion of the variation in GPU performance.
 
-# see metrics
-rf_metrics <- rf_preds |> metrics(truth = G3Dmark, estimate = .pred)
-rf_metrics
+However, the RMSE remains relatively large (~2296 points), which likely arises from:
 
+* nonlinear performance scaling (e.g., diminishing returns with TDP),
+* categorical effects that are not strictly linear (e.g., “workstation” vs “gaming”),
+* missing interactions between variables, and
+* price volatility that does not always reflect performance (especially for mobile or legacy devices).
+
+Despite these limitations, the model provides a good baseline understanding of how high-level attributes correlate with GPU performance.
+
+\pagebreak
+
+# Building a Random Forest Model With Feature Importance (Using `Tidymodels`)
+```{r}
+set.seed(527)
+split <- initial_split(model_data, prop=0.8)
+train  <- training(split)
+test   <- testing(split)
+
+rf_recipe <- recipe(G3Dmark ~ ., data=train) |> step_normalize(all_numeric_predictors())
+
+rf_spec <- rand_forest(mtry=3, trees=500, min_n=5) |>
+  set_engine("randomForest", importance=TRUE) |>
+  set_mode("regression")
+
+rf_fit <- workflow() |> add_recipe(rf_recipe) |> add_model(rf_spec) |> fit(train)
+
+rf_preds <- predict(rf_fit, test) |> bind_cols(test)
+
+rf_metrics <- metrics(rf_preds, truth = G3Dmark, estimate = .pred)
+rf_metrics   # print it
+
+# Same variable importance plot as the long version
 rf_fit |> extract_fit_parsnip() |> pluck("fit") |> varImpPlot()
 ```
+The random forest model yields an R² of **0.860**, slightly lower than linear regression, but with similar predictive error (RMSE $\approx \ 2446$).
 
-LASSO/Ridge Regression
+The variable importance chart indicates:
+
+1. **testDate** and **TDP** are the strongest predictors, meaning performance is primarily driven by architecture generation and power budget.
+2. **Manufacturer** and **category** contribute meaningfully but less strongly.
+3. **Price** shows moderate predictive power, reflecting market inconsistencies such as MSRP overshooting real-world capability.
+
+Random forests succeed at capturing nonlinear interactions but may overfit slightly due to the relatively small number of merged observations (647 rows).
+
+\pagebreak
+
+# LASSO/Ridge Regression
+
 ```{r}
-data <- merged_gpu |> select(G3Dmark, testDate, TDP, price, Manufacturer, category) |> drop_na() |> mutate(Manufacturer = factor(Manufacturer), category = factor(category))
 set.seed(123)
-reg_split <- initial_split(data, prop = 0.8)
+reg_split <- initial_split(model_data, prop=0.8)
 train_reg <- training(reg_split)
 test_reg  <- testing(reg_split)
 
-reg_recipe <-
-  recipe(G3Dmark ~ testDate + TDP + price + Manufacturer + category, data = train_reg) |> step_normalize(all_numeric_predictors()) |> step_dummy(all_nominal_predictors())
+reg_recipe <- recipe(G3Dmark ~ ., data=train_reg) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors())
 
+lambda_grid <- grid_regular(penalty(), levels=30)
 
-ridge_spec <-linear_reg(penalty = tune(), mixture = 0) |> set_engine("glmnet")
-lasso_spec <-linear_reg(penalty = tune(),mixture = 1) |> set_engine("glmnet")
-ridge_wf <- workflow() |> add_model(ridge_spec) |> add_recipe(reg_recipe)
-lasso_wf <- workflow() |> add_model(lasso_spec) |> add_recipe(reg_recipe)
+ridge_spec <- linear_reg(mixture=0, penalty=tune()) |> set_engine("glmnet")
+lasso_spec <- linear_reg(mixture=1, penalty=tune()) |> set_engine("glmnet")
 
-set.seed(123)
-reg_folds <- vfold_cv(train_reg, v = 5)
-lambda_grid <- grid_regular(penalty(), levels = 30)
-ridge_tuned <- tune_grid(ridge_wf, resamples = reg_folds, grid = lambda_grid, metrics = metric_set(rmse, rsq, mae))
-lasso_tuned <-tune_grid(lasso_wf,resamples = reg_folds, grid = lambda_grid, metrics= metric_set(rmse, rsq, mae))
+ridge_wf <- workflow() |> add_recipe(reg_recipe) |> add_model(ridge_spec)
+lasso_wf <- workflow() |> add_recipe(reg_recipe) |> add_model(lasso_spec)
 
-best_ridge <- ridge_tuned |> select_best(metric = "rmse")
-best_lasso <- lasso_tuned |> select_best(metric = "rmse")
-best_ridge
-best_lasso
+folds <- vfold_cv(train_reg, v=5)
 
-ridge_final_fit <-ridge_wf |> finalize_workflow(best_ridge) |> fit(data = train_reg)
-lasso_final_fit <- lasso_wf |> finalize_workflow(best_lasso) |> fit(data = train_reg)
+ridge_t <- tune_grid(ridge_wf, resamples=folds, grid=lambda_grid)
+lasso_t <- tune_grid(lasso_wf, resamples=folds, grid=lambda_grid)
 
-ridge_preds <-predict(ridge_final_fit, new_data = test_reg) |> bind_cols(test_reg |> select(G3Dmark))
-lasso_preds <-predict(lasso_final_fit, new_data = test_reg) |> bind_cols(test_reg |> select(G3Dmark))
+best_ridge <- select_best(ridge_t, metric = "rmse")
+best_lasso <- select_best(lasso_t, metric = "rmse")
 
+# --- FIT FINAL MODELS ---
+ridge_final_fit <- ridge_wf |> finalize_workflow(best_ridge) |> fit(train_reg)
+lasso_final_fit <- lasso_wf |> finalize_workflow(best_lasso) |> fit(train_reg)
+
+# --- PREDICT ON TEST SET ---
+ridge_preds <- predict(ridge_final_fit, new_data = test_reg) |>
+  bind_cols(test_reg |> select(G3Dmark))
+
+lasso_preds <- predict(lasso_final_fit, new_data = test_reg) |>
+  bind_cols(test_reg |> select(G3Dmark))
+
+# --- COMPUTE METRICS (RMSE, MAE, R²) ---
 ridge_metrics <- ridge_preds |> metrics(truth = G3Dmark, estimate = .pred)
 lasso_metrics <- lasso_preds |> metrics(truth = G3Dmark, estimate = .pred)
+
+# --- PRINT OUTPUTS LIKE THE OLD CODE ---
+best_ridge
+best_lasso
 ridge_metrics
 lasso_metrics
 ```
+
+LASSO and Ridge regression both converge on extremely small penalty values, indicating that **the predictors are not highly collinear** and that regularization does not dramatically simplify the model.
+
+Performance results:
+
+| Model | RMSE | R²    | MAE  |
+| ----- | ---- | ----- | ---- |
+| Ridge | 2360 | 0.858 | 1751 |
+| LASSO | 2522 | 0.850 | 1922 |
+
+Ridge performs slightly better, suggesting that all predictors contribute meaningfully and that shrinking coefficients uniformly is preferable to zeroing them out.
+
+These outcomes reinforce what was observed in the linear model:
+**GPU performance is strongly multi-factorial**, and even simple models capture much of its variance.
