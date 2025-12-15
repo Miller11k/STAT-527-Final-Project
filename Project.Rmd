@@ -390,7 +390,7 @@ model_data <- merged_gpu |>
   drop_na()
 ```
 
-# Building a Aimple Linear Regression Model
+# Building a Simple Linear Regression Model
 ```{r}
 lin_recipe <- recipe(G3Dmark ~ ., data = model_data) |> step_dummy(all_nominal_predictors())
 lin_spec   <- linear_reg() |> set_engine("lm")
@@ -504,7 +504,7 @@ LASSO and Ridge regression both converge on extremely small penalty values, indi
 
 Performance results:
 
-| Model | RMSE | R²    | MAE  |
+| Model | RMSE | R²    | MAE  | 
 | ----- | ---- | ----- | ---- |
 | Ridge | 2360 | 0.858 | 1751 |
 | LASSO | 2522 | 0.850 | 1922 |
@@ -513,3 +513,22 @@ Ridge performs slightly better, suggesting that all predictors contribute meanin
 
 These outcomes reinforce what was observed in the linear model:
 **GPU performance is strongly multi-factorial**, and even simple models capture much of its variance.
+
+
+# K Nearest Neighbors model
+
+```{r}
+# dataset split
+knn_reg_split <- initial_split(model_data, prop=0.8)
+knn_train <- training(knn_reg_split)
+knn_test  <- testing(knn_reg_split)
+
+knn_folds <- vfold_cv (knn_train, v=10)
+knn_model <- nearest_neighbor(neighbors=tune()) |> set_engine("kknn") |> set_mode("regression")
+knn_model_tuned <- tune_grid(knn_model,reg_recipe,knn_folds,grid = expand_grid(neighbors = c(1,3,5,10,20,50)))
+collect_metrics(knn_model_tuned) |> filter(.metric=="accuracy")
+show_best(knn_model_tuned, metric="rmse")
+
+
+
+```
