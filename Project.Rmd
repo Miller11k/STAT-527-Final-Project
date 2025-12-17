@@ -53,6 +53,8 @@ plot_time_series <- function(data, y, title, ylab, color_point, color_line) {
     geom_point(alpha = 0.4, color = color_point) +
     geom_smooth(method = "loess", se = FALSE, color = color_line) +
     theme_minimal() +
+    scale_x_continuous(breaks = seq(min(clean_data$testDate), 
+                                    max(clean_data$testDate), by = 1)) +
     labs(title = title, x = "Year", y = ylab)
   int_plot(p)
 }
@@ -89,7 +91,7 @@ merged_gpu <- merged_gpu |> select(-gpuName, -Device)
 cat("Rows in PassMark dataset:", nrow(gpu_benchmarks), "\n")
 cat("Rows in Geekbench dataset:", nrow(gpu_scores), "\n")
 cat("Rows in merged dataset:", nrow(merged_gpu), "\n\n")
-head(merged_gpu)
+head(merged_gpu, 50)
 ```
 
 
@@ -172,26 +174,56 @@ if (!is.null(merged_gpu$Metal)) {
 # add PerfPerWatt column once
 merged_gpu <- merged_gpu |> mutate(PerfPerWatt = G3Dmark / TDP)
 
-# gpu performance over time
-plot_time_series(merged_gpu, "G3Dmark", "GPU Performance Trend", 
-                 "G3Dmark (PassMark Score)", "blue", "darkblue")
+get_slope <- function(data, y, manufacturer = NULL, digits = 0) {
+  d <- data |> filter(!is.na(testDate), !is.na(.data[[y]]))
 
-# tdp over time
-plot_time_series(merged_gpu, "TDP", "GPU Power Trend", 
-                 "TDP (Watts)", "red", "darkred")
+  if (!is.null(manufacturer)) {
+    d <- d |> filter(Manufacturer == manufacturer)
+  }
 
-# efficiency over time
-plot_time_series(merged_gpu, "PerfPerWatt", "GPU Efficiency Trend", 
-                 "G3Dmark per Watt", "green", "darkgreen")
+  fit <- lm(reformulate("testDate", response = y), data = d)
+  round(coef(fit)["testDate"], digits)
+}
 
-# amd vs nvidia
+slope_g3d <- get_slope(merged_gpu, "G3Dmark")
+slope_tdp <- get_slope(merged_gpu, "TDP", digits = 2)
+slope_eff <- get_slope(merged_gpu, "PerfPerWatt", digits = 2)
+slope_amd <- get_slope(merged_gpu, "G3Dmark", manufacturer = "AMD")
+slope_nv  <- get_slope(merged_gpu, "G3Dmark", manufacturer = "Nvidia")
+
+# plots
+plot_time_series(
+  merged_gpu, "G3Dmark",
+  paste("GPU Performance Trend (Avg: ", slope_g3d, " G3DMark/year)"),
+  "G3Dmark (PassMark Score)", "blue", "darkblue"
+)
+
+plot_time_series(
+  merged_gpu, "TDP",
+  paste("GPU Power Trend (Avg: ", slope_tdp, " W per year)"),
+  "TDP (Watts)", "red", "darkred"
+)
+
+plot_time_series(
+  merged_gpu, "PerfPerWatt",
+  paste("GPU Efficiency Trend (Avg: ", slope_eff, " G3DMark per W/year)"),
+  "G3Dmark per Watt", "green", "darkgreen"
+)
+
 int_plot(
   ggplot(merged_gpu, aes(testDate, G3Dmark, color = Manufacturer)) +
     geom_point(alpha = 0.5) +
     geom_smooth(method = "loess", se = FALSE) +
     theme_minimal() +
-    labs(title = "Performance Trend Over Time by Manufacturer", 
-         x = "Year", y = "G3Dmark Score")
+    scale_x_continuous(breaks = seq(min(merged_gpu$testDate), 
+                                    max(merged_gpu$testDate), by = 1)) +
+    labs(
+      title = paste0(
+        "Performance by Manufacturer (AMD Avg: ",
+        slope_amd, ", Nvidia Avg: ", slope_nv, " G3DMark/year)"
+      ),
+      x = "Year", y = "G3Dmark Score"
+    )
 )
 ```
 
@@ -236,7 +268,7 @@ metrics(lin_preds, truth = G3Dmark, estimate = .pred)
 ## Model 3, 4: LASSO/Ridge Regression
 (d) We try Ridge and LASSO regression, tuning the regularization strength with cross-validation to control overfitting and compare their predictive performance.
 ```{r}
-folds <- vfold_cv(train, v=5)
+folds <- vfold_cv(train, v=10)
 lambda_grid <- grid_regular(penalty(), levels= 30)
 
 ridge_spec <-linear_reg(mixture=0, penalty =tune()) |> set_engine("glmnet")
@@ -274,12 +306,9 @@ knn_model <- nearest_neighbor(neighbors = tune()) |>
   set_engine("kknn") |> set_mode("regression")
 knn_wf <- workflow() |> add_recipe(common_recipe) |> add_model(knn_model)
 
-knn_tuned <- tune_grid(
-  knn_wf,
-  resamples = knn_folds,
-  grid = tibble(neighbors = c(1, 3, 5, 10, 20, 50)),
-  metrics = metric_set(rmse, rsq, mae)
-)
+knn_tuned <- tune_grid(knn_wf, resamples = knn_folds, 
+                       grid = tibble(neighbors = c(1, 3, 5, 10, 20, 50)),
+                       metrics = metric_set(rmse, rsq, mae))
 
 show_best(knn_tuned, metric = "rmse")
 best_k <- select_best(knn_tuned, metric = "rmse")
@@ -294,12 +323,27 @@ metrics(knn_preds, truth = G3Dmark, estimate = .pred)
 ```{r}
 rf_recipe <- recipe(G3Dmark ~ ., data = train) |> 
   step_normalize(all_numeric_predictors()) # we do not want dummy for rf.
-rf_spec <- rand_forest(mtry=3, trees=500, min_n=5) |> 
-  set_engine("randomForest", importance=TRUE) |> set_mode("regression")
-rf_wf<- workflow() |> add_recipe(rf_recipe) |> add_model(rf_spec)
-rf_fit <- rf_wf |> fit(data = train)
+
+rf_spec <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) |> 
+  set_engine("randomForest", importance = TRUE) |> 
+  set_mode("regression")
+
+rf_wf <- workflow() |> add_recipe(rf_recipe) |> add_model(rf_spec)
+folds <- vfold_cv(train, v = 10)
+
+rf_params <- parameters(finalize(mtry(), train), trees(range = c(200, 600)),
+  min_n(range = c(2, 25)))
+
+rf_grid <- grid_regular(rf_params, levels = 4)
+
+rf_tune <- tune_grid(rf_wf, resamples = folds, grid = rf_grid,
+  metrics = metric_set(rmse, rsq, mae))
+
+best_rf <- select_best(rf_tune, metric = "rmse")
+final_rf <- finalize_workflow(rf_wf, best_rf)
+rf_fit <- final_rf |> fit(data = train)
 rf_preds <- predict(rf_fit, test) |> bind_cols(test)
 rf_metrics <- metrics(rf_preds, truth = G3Dmark, estimate = .pred)
-rf_metrics  
+rf_metrics
 rf_fit |> extract_fit_parsnip() |> pluck("fit") |> varImpPlot()
 ```
