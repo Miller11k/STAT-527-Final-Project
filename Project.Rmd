@@ -91,7 +91,7 @@ merged_gpu <- merged_gpu |> select(-gpuName, -Device)
 cat("Rows in PassMark dataset:", nrow(gpu_benchmarks), "\n")
 cat("Rows in Geekbench dataset:", nrow(gpu_scores), "\n")
 cat("Rows in merged dataset:", nrow(merged_gpu), "\n\n")
-head(merged_gpu, 50)
+head(merged_gpu)
 ```
 
 
@@ -218,12 +218,10 @@ int_plot(
     scale_x_continuous(breaks = seq(min(merged_gpu$testDate), 
                                     max(merged_gpu$testDate), by = 1)) +
     labs(
-      title = paste0(
+      title = paste(
         "Performance by Manufacturer (AMD Avg: ",
-        slope_amd, ", Nvidia Avg: ", slope_nv, " G3DMark/year)"
-      ),
-      x = "Year", y = "G3Dmark Score"
-    )
+        slope_amd, ", Nvidia Avg: ", slope_nv, " G3DMark/year)"),
+      x = "Year", y = "G3Dmark Score")
 )
 ```
 
@@ -265,8 +263,8 @@ lin_preds <- predict(lin_fit, new_data = test) |> bind_cols(test)
 metrics(lin_preds, truth = G3Dmark, estimate = .pred)
 ```
 
-## Model 3, 4: LASSO/Ridge Regression
-(d) We try Ridge and LASSO regression, tuning the regularization strength with cross-validation to control overfitting and compare their predictive performance.
+## Model 2, 3: LASSO/Ridge Regression
+(c) We try Ridge and LASSO regression, tuning the regularization strength with cross-validation to control overfitting and compare their predictive performance.
 ```{r}
 folds <- vfold_cv(train, v=10)
 lambda_grid <- grid_regular(penalty(), levels= 30)
@@ -298,8 +296,8 @@ ridge_metrics
 lasso_metrics
 ```
 
-## Model 5: KNN
-(e) We use KNN model, tuning the number of neighbors with cross-validation to see how a distance-based approach performs on this dataset.
+## Model 4: KNN
+(d) We use KNN model, tuning the number of neighbors with cross-validation to see how a distance-based approach performs on this dataset.
 ```{r}
 knn_folds <- vfold_cv(train, v = 10)
 knn_model <- nearest_neighbor(neighbors = tune()) |> 
@@ -318,8 +316,8 @@ knn_preds <- predict(knn_final, new_data = test) |> bind_cols(test)
 metrics(knn_preds, truth = G3Dmark, estimate = .pred)
 ```
 
-## Model 2: Random Forest
-(c) Finally, we fit a random forest model to see which features matter most.
+## Model 5: Random Forest
+(e) Finally, we fit a random forest model to see which features matter most.
 ```{r}
 rf_recipe <- recipe(G3Dmark ~ ., data = train) |> 
   step_normalize(all_numeric_predictors()) # we do not want dummy for rf.
